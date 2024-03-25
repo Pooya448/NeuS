@@ -1,0 +1,3 @@
+[submodule "nerfacc"]
+	path = nerfacc
+	url = https://github.com/nerfstudio-project/nerfacc.git

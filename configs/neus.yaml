@@ -1,0 +1,68 @@
+experiment:
+  run_name: init
+  base_run_dir: runs/
+
+dataset:
+  data_dir: /scratch/pka87/datasets/nerf_synthetic
+  scene_name: chair
+  num_rays: 512
+  near: 2.0
+  far: 6.0
+  background_color: black
+
+train:
+  learning_rate: 5e-4
+  learning_rate_alpha: 0.05
+  end_iter: 300000
+  batch_size: 1
+  validate_resolution_level: 4
+  warm_up_end: 5000
+  anneal_end: 50000
+  use_white_bkgd: False
+  save_freq: 10000
+  val_freq: 2500
+  val_mesh_freq: 5000
+  report_freq: 100
+  igr_weight: 0.1
+  mask_weight: 0.0
+
+model:
+  nerf:
+    D: 8
+    W: 256
+    d_in: 4
+    d_in_view: 3
+    multires: 10
+    multires_view: 4
+    output_ch: 4
+    skips: [4]
+    use_viewdirs: True
+
+  sdf_net:
+    d_in: 3
+    d_out: 257
+    d_hidden: 256
+    n_hidden: 8
+    skips: [4]
+    multires: 6
+    bias: 0.5
+    scale: 1.0
+
+  var_net:
+    init_val: 0.3
+
+  rgb_net:
+    d_in: 9
+    d_out: 3
+    d_hidden: 256
+    d_feats: 256
+    n_hidden: 4
+    multires: 4
+
+  renderer:
+    n_samples: 64
+    n_importance: 64
+    n_outside: 32
+    up_sample_steps: 4
+    perturb: 1.0
+
