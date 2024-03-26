@@ -1,13 +1,12 @@
 experiment:
-  run_name: init
   base_run_dir: runs/
 
 dataset:
   data_dir: /scratch/pka87/datasets/nerf_synthetic
   scene_name: chair
-  num_rays: 512
-  near: 2.0
-  far: 6.0
+  num_rays: 1024
+  near: 2.  # TODO: not used, remove
+  far: 6.0 # TODO: not used, remove
   background_color: black
 
 train:
@@ -20,9 +19,9 @@ train:
   anneal_end: 50000
   use_white_bkgd: False
   save_freq: 10000
-  val_freq: 2500
-  val_mesh_freq: 5000
-  report_freq: 100
+  val_freq: 5000
+  val_mesh_freq: 10000
+  report_freq: 200
   igr_weight: 0.1
   mask_weight: 0.0
 

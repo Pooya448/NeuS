@@ -181,7 +181,7 @@ class NeuSRenderer:
             rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]
         )  # n_rays, n_samples, 3
         radius = torch.linalg.norm(pts, ord=2, dim=-1, keepdim=False)
-        inside_sphere = (radius[:, :-1] < 1.0) | (radius[:, 1:] < 1.0)
+        inside_sphere = (radius[:, :-1] < 1.5) | (radius[:, 1:] < 1.5)  #! TEST1->1.5
         sdf = sdf.reshape(batch_size, n_samples)
         prev_sdf, next_sdf = sdf[:, :-1], sdf[:, 1:]
         prev_z_vals, next_z_vals = z_vals[:, :-1], z_vals[:, 1:]
@@ -322,8 +322,8 @@ class NeuSRenderer:
         pts_norm = torch.linalg.norm(pts, ord=2, dim=-1, keepdim=True).reshape(
             batch_size, n_samples
         )
-        inside_sphere = (pts_norm < 1.0).float().detach()
-        relax_inside_sphere = (pts_norm < 1.2).float().detach()
+        inside_sphere = (pts_norm < 1.5).float().detach()  #! TEST 1->1.5
+        relax_inside_sphere = (pts_norm < 1.7).float().detach()  #! TEST 1.2->1.7
 
         # Render with background
         if background_alpha is not None:
@@ -387,16 +387,19 @@ class NeuSRenderer:
         cos_anneal_ratio=0.0,
     ):
         batch_size = len(rays_o)
+        #! TEST2->3
         sample_dist = (
-            2.0 / self.n_samples
+            3.0 / self.n_samples
         )  # Assuming the region of interest is a unit sphere
-        z_vals = torch.linspace(0.0, 1.0, self.n_samples)
+        #! TEST 1->1.5
+        z_vals = torch.linspace(0.0, 1.5, self.n_samples)
         z_vals = near + (far - near) * z_vals[None, :]
 
         z_vals_outside = None
         if self.n_outside > 0:
+            #! TEST 1->1.5
             z_vals_outside = torch.linspace(
-                1e-3, 1.0 - 1.0 / (self.n_outside + 1.0), self.n_outside
+                1e-3, 1.5 - 1.0 / (self.n_outside + 1.0), self.n_outside
             )
 
         n_samples = self.n_samples
@@ -406,7 +409,7 @@ class NeuSRenderer:
             perturb = perturb_overwrite
         if perturb > 0:
             t_rand = torch.rand([batch_size, 1]) - 0.5
-            z_vals = z_vals + t_rand * 2.0 / self.n_samples
+            z_vals = z_vals + t_rand * 3.0 / self.n_samples  #!TEST 2->3
 
             if self.n_outside > 0:
                 mids = 0.5 * (z_vals_outside[..., 1:] + z_vals_outside[..., :-1])
@@ -416,8 +419,8 @@ class NeuSRenderer:
                 z_vals_outside = lower[None, :] + (upper - lower)[None, :] * t_rand
 
         if self.n_outside > 0:
-            z_vals_outside = (
-                far / torch.flip(z_vals_outside, dims=[-1]) + 1.0 / self.n_samples
+            z_vals_outside = (  #! TEST 1->1.5
+                far / torch.flip(z_vals_outside, dims=[-1]) + 1.5 / self.n_samples
             )
 
         background_alpha = None

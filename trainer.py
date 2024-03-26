@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
@@ -13,7 +13,7 @@ from models.VarNet import VarNet
 from data.nerf_synthetic import NeRFSyntheticData
 from models.Render import OccGridRenderer
 from lpips import LPIPS
-
+import trimesh
 from models.Renderer import NeuSRenderer
 
 
@@ -38,6 +38,7 @@ class NeuSTrainer(object):
         self.trainable_params = []
         self.device = device
         self.iter_step = 0
+        self.val_idx = [63]
 
         self.train_dataset = self.create_datasets(self.config, self.subject, "train")
         self.test_dataset = self.create_datasets(self.config, self.subject, "test")
@@ -102,14 +103,15 @@ class NeuSTrainer(object):
         )
 
         if self.use_checkpoint:
-            self.load_latest_checkpoint()
+            self.load_latest_checkpoint(self.run_folder)
 
-        wandb.watch(
-            (self.nerf, self.rgb_net, self.sdf_net, self.var_net),
-            log="all",
-            log_freq=self.val_freq,
-            log_graph=True,
-        )
+        if run is not None:
+            wandb.watch(
+                (self.nerf, self.rgb_net, self.sdf_net, self.var_net),
+                log="all",
+                log_freq=self.val_freq,
+                log_graph=True,
+            )
 
     def set_train(self):
         self.nerf.train()
@@ -123,16 +125,34 @@ class NeuSTrainer(object):
         self.sdf_net.eval()
         self.var_net.eval()
 
+    def test(self, mesh_res=128, threshold=0.0) -> None:
+        test_idx = np.random.randint(0, len(self.test_dataset), 10)
+        print(f"Testing for {len(test_idx)} views.")
+        test_loader = self.test_dataset.get_subset_loader(
+            batch_size=self.batch_size, indices=test_idx
+        )
+        self.test_val(loader=test_loader, mode="test")
+        print("Extracting mesh...")
+        self.extract_mesh(resolution=mesh_res, threshold=threshold)
+        print("Testing complete.")
+
     def train(self) -> None:
         self.update_learning_rate()
         res_iter = self.end_iter - self.iter_step
-        data_loader = self.train_dataset.get_loader(batch_size=self.batch_size)
-        test_loader = self.test_dataset.get_loader(batch_size=self.batch_size)
+        epoch_len = len(self.train_dataset)
+        epochs = res_iter // epoch_len
 
-        for _ in range(res_iter // 100):
-            for batch in data_loader:
-                # batch = next(iter(data_loader))
-                self.set_train()
+        print(f"Training for {epochs} epochs, with {epoch_len} iterations per epoch.")
+
+        train_loader = self.train_dataset.get_loader(batch_size=self.batch_size)
+        test_loader = self.test_dataset.get_subset_loader(
+            batch_size=self.batch_size, indices=self.val_idx
+        )
+
+        for _ in range(epochs):
+
+            for batch in train_loader:
+
                 ### Get batch data
                 rays_o = batch.get("rays_o").squeeze()
                 rays_v = batch.get("rays_v").squeeze()
@@ -191,7 +211,9 @@ class NeuSTrainer(object):
                     self.save_checkpoint()
 
                 if self.iter_step % self.report_freq == 0:
-                    print(f"iter:{self.iter_step} loss = {loss}")
+                    print(
+                        f"iter:[{self.iter_step}/{res_iter}], PSNR: {psnr:.3f}, Loss: {loss:.6f}"
+                    )
                     wandb.log(
                         data={
                             "RGB Loss": color_loss.item(),
@@ -203,11 +225,24 @@ class NeuSTrainer(object):
                     )
 
                 if self.iter_step % self.val_freq == 0:
-                    self.val_image(test_loader)
+                    self.test_val(test_loader, mode="val")
+
+                if self.iter_step % self.val_mesh_freq == 0:
+                    self.extract_mesh()
 
     def load_latest_checkpoint(self, run_folder: Path) -> None:
+
+        def extract_epoch(filename):
+            import re
+
+            match = re.search(r"model_epoch-(\d+)", filename.stem)
+            if match:
+                return int(match.group(1))
+            else:
+                return -1  # Return -1 if the pattern doesn't match
+
         models = [x for x in run_folder.glob("model_epoch-*.pth")]
-        models.sort()
+        models.sort(key=extract_epoch)
         latest_model = models[-1]
         checkpoint = torch.load(latest_model)
         self.nerf.load_state_dict(checkpoint["nerf"])
@@ -238,53 +273,89 @@ class NeuSTrainer(object):
         else:
             return np.min([1.0, self.iter_step / self.anneal_end])
 
-    def val_image(self, loader):
+    def extract_mesh(self, resolution=128, threshold=0.0):
+        object_bbox_min = torch.tensor([-1.51, -1.51, -1.51], device=self.device)
+        object_bbox_max = torch.tensor([1.51, 1.51, 1.51], device=self.device)
+
+        vertices, triangles = self.renderer.extract_geometry(
+            object_bbox_min, object_bbox_max, resolution=resolution, threshold=threshold
+        )
+        mesh = trimesh.Trimesh(vertices, triangles)
+        save_folder = self.run_folder / "meshes"
+        save_folder.mkdir(parents=True, exist_ok=True)
+        save_path = save_folder / f"mesh_{self.iter_step}_{threshold}_{resolution}.obj"
+        mesh.export(save_path)
+
+        if self.run is not None:
+            wandb.log(
+                {
+                    "val_mesh": [
+                        wandb.Object3D(open(save_path)),
+                    ]
+                }
+            )
+        return
+
+    def test_val(self, loader, mode: str):
 
         self.set_eval()
 
-        batch = next(iter(loader))
-        rays_o = batch.get("rays_o").squeeze()
-        rays_v = batch.get("rays_v").squeeze()
-        near = batch.get("near").squeeze()[..., None]
-        far = batch.get("far").squeeze()[..., None]
-        bck_color = batch.get("bck_color").squeeze()
+        for m, batch in enumerate(loader):
+            rays_o = batch.get("rays_o").squeeze()
+            rays_v = batch.get("rays_v").squeeze()
+            near = batch.get("near").squeeze()[..., None]
+            far = batch.get("far").squeeze()[..., None]
+            bck_color = batch.get("bck_color").squeeze()
 
-        H, W = rays_o.shape[:2]
+            H, W = rays_o.shape[:2]
 
-        rays_o = rays_o.reshape(-1, 3)
-        rays_v = rays_v.reshape(-1, 3)
-        near = near.reshape(-1, 1)
-        far = far.reshape(-1, 1)
+            rays_o = rays_o.reshape(-1, 3)
+            rays_v = rays_v.reshape(-1, 3)
+            near = near.reshape(-1, 1)
+            far = far.reshape(-1, 1)
 
-        rgb_outs = []
-        chunk_size = (800 * 800) // 1000
-        n_chunks = (H * W) // chunk_size
-        for i in range(n_chunks):
-            start = i * chunk_size
-            end = (i + 1) * chunk_size
-            render_out = self.renderer.render(
-                rays_o[start:end],
-                rays_v[start:end],
-                near[start:end],
-                far[start:end],
-                cos_anneal_ratio=self.get_cos_anneal_ratio(),
-                background_rgb=bck_color,
-            )
-            rgb_outs.append(render_out["color_fine"].detach().cpu().numpy())
+            rgb_outs = []
+            chunk_size = (800 * 800) // 1000
+            n_chunks = (H * W) // chunk_size
+            for i in range(n_chunks):
+                start = i * chunk_size
+                end = (i + 1) * chunk_size
+                render_out = self.renderer.render(
+                    rays_o[start:end],
+                    rays_v[start:end],
+                    near[start:end],
+                    far[start:end],
+                    cos_anneal_ratio=self.get_cos_anneal_ratio(),
+                    background_rgb=bck_color,
+                )
+                rgb_outs.append(render_out["color_fine"].detach().cpu().numpy())
 
-        if len(rgb_outs) == n_chunks:
-            out_rgb = np.concatenate(rgb_outs, axis=0)
-            out_rgb = out_rgb.reshape(H, W, 3)
-            out_rgb = np.clip(out_rgb, 0, 1)
-            out_rgb = (out_rgb * 255).astype(np.uint8)
+            if len(rgb_outs) == n_chunks:
+                out_rgb = np.concatenate(rgb_outs, axis=0)
+                out_rgb = out_rgb.reshape(H, W, 3)
+                out_rgb = np.clip(out_rgb, 0, 1)
+                out_rgb = (out_rgb * 255).astype(np.uint8)
 
-            save_path = self.run_folder / f"val_{self.iter_step}.png"
+                if mode == "val":
+                    fp = "val_images"
+                elif mode == "test":
+                    fp = "test_images"
 
-            import imageio
+                save_folder = self.run_folder / fp
+                save_folder.mkdir(parents=True, exist_ok=True)
+                save_path = save_folder / f"{mode}_{self.iter_step}_{m}.png"
 
-            imageio.imwrite(save_path, out_rgb)
-            im = wandb.Image(out_rgb, caption="Model RGB Output")
-            wandb.log({f"val_{self.iter_step}": im}, step=self.iter_step)
+                import imageio
+
+                imageio.imwrite(save_path, out_rgb)
+
+                if self.run is not None:
+                    im = wandb.Image(out_rgb, caption=f"{mode} RGB Output")
+                    wandb.log({f"{mode}_image_{i}": im}, step=self.iter_step)
+
+        if mode == "val":
+            self.set_train()
+        return
 
     def create_datasets(self, config: dict, subject: str, split: str) -> Dataset:
 
@@ -314,7 +385,7 @@ class NeuSTrainer(object):
             },
             save_path,
         )
-        artifact = wandb.Artifact("model", type="model")
-        artifact.add_file(save_path)
         if self.run is not None:
+            artifact = wandb.Artifact("model", type="model")
+            artifact.add_file(save_path)
             self.run.log_artifact(artifact)

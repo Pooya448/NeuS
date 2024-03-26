@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 import json
 import os
 from abc import ABC, abstractmethod
@@ -157,8 +157,8 @@ class NeRFSyntheticData(Dataset):
         a = torch.sum(rays_v**2, dim=-1, keepdim=True)
         b = 2.0 * torch.sum(rays_o * rays_v, dim=-1, keepdim=True)
         mid = 0.5 * (-b) / a
-        near = mid - 1.0
-        far = mid + 1.0
+        near = mid - 1.51
+        far = mid + 1.51
         return near, far
 
     def _load_data(self, data_dir: Path, subject_id: str, split: str):
@@ -168,7 +168,7 @@ class NeRFSyntheticData(Dataset):
         with open(metafile, "r") as fp:
             metadata = json.load(fp)
 
-        meta_len = len(metadata["frames"][:2])  #! FOR DEBUG
+        meta_len = len(metadata["frames"])
         images = []
         cam2worlds = []
 
@@ -193,5 +193,12 @@ class NeRFSyntheticData(Dataset):
     def get_loader(self, batch_size: int):
         return torch.utils.data.DataLoader(
             self,
+            batch_size=batch_size,
+        )
+
+    def get_subset_loader(self, batch_size: int, indices):
+        sub = Subset(self, indices)
+        return torch.utils.data.DataLoader(
+            sub,
             batch_size=batch_size,
         )
